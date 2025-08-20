@@ -33,7 +33,7 @@ fn main() -> std::io::Result<()> {
     }
 }
 
-/// Handles the messages sent by the current source client. Function is exited when the source disconnects.
+/// Function to handle the messages sent by the current source client. Function is exited when the source disconnects.
 fn handle_source(mut source_stream: TcpStream, destinations: &Arc<Mutex<Vec<TcpStream>>>) -> std::io::Result<()> {
     let mut buffer: Vec<u8> = Vec::new();
     let mut read_buffer = [0u8; 1024];
@@ -61,11 +61,22 @@ fn handle_source(mut source_stream: TcpStream, destinations: &Arc<Mutex<Vec<TcpS
                 let length_bytes = &buffer[2..4];
                 let length = u16::from_be_bytes([length_bytes[0], length_bytes[1]]) as usize;
 
+                let options = buffer[1];
+                let sensitive_bit = (options >> 6) & 1;
+
+                let checksum_bytes = &buffer[4..6];
+                let checksum = u16::from_be_bytes([checksum_bytes[0], checksum_bytes[1]]);
+
                 if buffer.len() < 8 + length { // Full message has not been received yet.
                     break;
                 }
 
                 let message: Vec<u8> = buffer.drain(..8 + length).collect();
+
+                if sensitive_bit == 1 && !verify_checksum(&message, checksum) { // Checksum is checked and is not correct.
+                    eprintln!("Checksum invalid for message: {:?}, message dropped.", message);
+                    break;
+                }
 
                 // Broadcast message to destination clients.
                 // Vector to contain the indexes of the destination clients to be removed from destinations vector.
@@ -89,4 +100,32 @@ fn handle_source(mut source_stream: TcpStream, destinations: &Arc<Mutex<Vec<TcpS
     }
 
     Ok(())
+}
+
+/// Function to verify the stated checksum against the given message and return an appropriate true/false value.
+fn verify_checksum(message: &[u8], checksum: u16) -> bool {
+    let mut sum: u32 = 0;
+
+    // Iterate over each 2-byte word in the message.
+    let mut message_index = 0;
+    while message_index < message.len() {
+        let word = if message_index == 4 { // The 2 bytes contained in the checksum field.
+            0xCCCCu16
+        } else {
+            let high_byte = message[message_index] as u16;
+            let low_byte = if message_index + 1 < message.len() { message[message_index + 1] as u16 } else { 0 };
+            (high_byte << 8) | low_byte
+        };
+
+        sum += word as u32; // Store sum as 32 bit to avoid any overflow.
+
+        while sum > 0xFFFF {
+            sum = (sum & 0xFFFF) + (sum >> 16);
+        }
+
+        message_index += 2;
+    }
+
+    let computed = !(sum as u16); // Finds the one's complement of the calculated sum.
+    computed == checksum
 }
